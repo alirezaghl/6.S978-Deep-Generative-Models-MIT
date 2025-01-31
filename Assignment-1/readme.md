@@ -28,36 +28,6 @@ python vae.py
 python autoencoder.py
 ```
 
-## Features
-
-* Two autoencoder architectures:
-  * Variational Autoencoder with SGVB and KL-WO-E regularization
-  * Convolutional Autoencoder with skip connections
-
-* Visualization tools:
-  * Original vs reconstructed image comparison
-  * 2D latent space visualization
-  * Training loss curves
-
-## Key Parameters
-
-Modify these in Config class:
-```python
-input_dim = 784  # MNIST image size
-hidden_dims = [128, 32, 16, 4]  # Network architecture
-batch_size = 256
-epochs = 50
-lr = 1e-3
-```
-
-## Results
-
-* Both implementations include:
-  * Training progress display with tqdm
-  * Loss tracking per epoch
-  * Image reconstruction visualization
-  * Latent space exploration
-
 ## Attribution
 
 Based on Assignment 1 from MIT's 6.S978 course: https://mit-6s978.github.io/schedule.html
