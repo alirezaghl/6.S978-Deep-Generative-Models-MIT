@@ -1,0 +1,211 @@
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+import numpy as np
+from dataclasses import dataclass
+from torchvision import datasets, transforms
+from tqdm import tqdm
+
+@dataclass
+class Config:
+    input_c: int = 1
+    c_hidden: int = 32
+    c_latent: int = 2
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    epochs: int = 100
+    lr: float = 3e-4
+    batch_size: int = 128
+
+
+tensor_transform = transforms.ToTensor()
+
+MNIST_dataset = datasets.MNIST(root = "./data",
+									train = True,
+									download = True,
+									transform = tensor_transform)
+
+MNIST_loader = torch.utils.data.DataLoader(dataset = MNIST_dataset,
+							   batch_size = Config.batch_size,
+								 shuffle = True)
+
+
+
+
+#MODEL
+class Encoder(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        
+        self.recognition = nn.Sequential(
+            # 28, 28 -> 14, 14
+            nn.Conv2d(config.input_c, config.c_hidden, kernel_size=3, padding=1, stride=2), # 32, 14, 14
+            nn.GELU(),
+            nn.Conv2d(config.c_hidden, config.c_hidden, kernel_size=3, padding=1), # 32, 14, 14
+            nn.GELU(),
+            # 14, 14 -> 7, 7
+            nn.Conv2d(config.c_hidden, 2*config.c_hidden, kernel_size=3, padding=1, stride=2), # 64, 7, 7
+            nn.GELU(),
+            nn.Conv2d(2*config.c_hidden, 2*config.c_hidden, kernel_size=3, padding=1), # 64, 7, 7
+            nn.GELU(),
+            # 7, 7 -> 4, 4
+            nn.Conv2d(2*config.c_hidden, 2*config.c_hidden, kernel_size=3, padding=1, stride=2), # 64, 4, 4
+            nn.GELU(),
+            nn.Flatten(), # 1024
+            nn.Linear(2*config.c_hidden*4*4, config.c_latent)
+        )
+    
+    def forward(self, x):
+        return self.recognition(x)
+
+    
+
+class Decoder(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        
+        self.linear = nn.Linear(config.c_latent, 2*config.c_hidden*4*4)
+        self.generator = nn.Sequential(
+            nn.ConvTranspose2d(2*config.c_hidden, 2*config.c_hidden, kernel_size=3, stride=2, padding=1, output_padding=0), # 64, 7, 7
+            nn.GELU(),
+            nn.Conv2d(2*config.c_hidden, 2*config.c_hidden, kernel_size=3, padding=1),
+            nn.GELU(),
+            
+            # 7x7 -> 14x14
+            nn.ConvTranspose2d(2*config.c_hidden, config.c_hidden, kernel_size=3, output_padding=1, padding=1, stride=2),
+            nn.GELU(),
+            nn.Conv2d(config.c_hidden, config.c_hidden, kernel_size=3, padding=1),
+            nn.GELU(),
+            
+            # 14x14 -> 28x28
+            nn.ConvTranspose2d(config.c_hidden, config.input_c, kernel_size=3, output_padding=1, padding=1, stride=2),
+            nn.Tanh()
+        )
+    
+    def forward(self, config, x):
+        x = self.linear(x)
+        x = x.view(-1, 2*config.c_hidden, 4, 4) 
+        x = self.generator(x)
+        return x
+
+
+
+class AE(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+
+        self.encoder =  Encoder(config).to(config.device)
+        self.decoder =  Decoder(config).to(config.device)
+    
+    def forward(self, x, config):
+        x = x.view(-1, config.input_c, 28, 28)
+        z = self.encoder(x)
+        x_reconstructed = self.decoder(config, z)
+        return x_reconstructed.view(-1, 784)  # Flatten output to match input shape
+
+# #test
+# config = Config()
+# # For MNIST-like images: [batch_size, channels, height, width]
+# input_dim = 784
+# test_tensor = torch.randn([1, input_dim]).to(config.device)
+
+# ae_test = AE(config).to(config.device)
+
+# with torch.no_grad():
+#   test_out = ae_test(test_tensor, config)
+#   print(test_out.shape)
+
+
+
+
+
+#TRAINING
+
+class Trainer:
+    def __init__(self, config):
+        self.config = config
+        self.model = AE(config)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=config.lr)
+        self.mse = nn.MSELoss()
+    
+    def loss(self, x):
+        x_reconstructed = self.model(x, self.config)
+        err = self.mse(x_reconstructed, x)
+        logpx_z = -1.0 * torch.sum(err) # negative log likelihood
+        return -1.0 * torch.mean(logpx_z) # minimize the negative log likelihood
+
+
+    def train(self, dataloader, config):
+        losses = []
+        for epoch in tqdm(range(config.epochs), desc = 'Epochs'):
+            running_loss = 0.0
+            batch_progress = tqdm(dataloader, desc = 'Batches', leave = False)
+
+            for iter, (images, _) in enumerate(batch_progress):
+                batch_size = images.shape[0]
+                images = images.reshape(batch_size, -1).to(config.device)   
+                loss = self.loss(images)
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+
+                running_loss += loss.item()
+                avg_loss = running_loss / len(MNIST_dataset) * batch_size
+                losses.append(loss.item())
+            
+            tqdm.write(f'----\nEpoch [{epoch+1}/{config.epochs}], Average Loss: {avg_loss:.4f}\n')
+
+
+#EVALUATION
+
+def plot_latent_images(model, n, digit_size=28):
+    grid_x = np.linspace(-2, 2, n)
+    grid_y = np.linspace(-2, 2, n)
+
+    image_width = digit_size * n
+    image_height = digit_size * n
+    image = np.zeros((image_height, image_width))
+
+    for i, yi in enumerate(grid_x):
+        for j, xi in enumerate(grid_y):
+            z = torch.tensor([[xi, yi]], dtype=torch.float32).to(model.decoder.linear.weight.device)
+            with torch.no_grad():
+                x_decoded = model.decoder(Config(), z)
+            digit = x_decoded.view(digit_size, digit_size).cpu().numpy()
+            image[i * digit_size: (i + 1) * digit_size,
+                  j * digit_size: (j + 1) * digit_size] = digit
+
+    plt.figure(figsize=(10, 10))
+    plt.imshow(image, cmap='Greys_r')
+    plt.axis('Off')
+    plt.show()
+
+
+def eval(model, config):
+    original_imgs = torch.cat([MNIST_dataset[i][0] for i in range(5)])
+    with torch.no_grad():
+        reconstructed_imgs = model(original_imgs.reshape(5, -1).to(config.device), config)
+        reconstructed_imgs = reconstructed_imgs.cpu().reshape(*original_imgs.shape)
+
+    _, axes = plt.subplots(5, 2, figsize=(10, 25))
+
+    for i in range(5):
+        original_image = original_imgs[i].reshape(28, 28)
+        axes[i, 0].imshow(original_image, cmap='gray')
+        axes[i, 0].set_title(f'Original Image {i+1}')
+        axes[i, 0].axis('off')
+
+        reconstructed_image = reconstructed_imgs[i].reshape(28, 28)
+        axes[i, 1].imshow(reconstructed_image, cmap='gray')
+        axes[i, 1].set_title(f'Reconstructed Image {i+1}')
+        axes[i, 1].axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+
+
+
+trainer = Trainer(Config)
+trainer.train(MNIST_loader, Config)
+eval(trainer.model, Config)
+plot_latent_images(trainer.model, n=8)
